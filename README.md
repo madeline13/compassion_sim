@@ -1,5 +1,5 @@
 # An Abstracted Simulation of Compassionate Judgement and Action
-A computer simulation of compassionate action.
+A computer simulation of compassionate action in a collection of individuals.
 
 Compassion is a normative judgement of the difference between biological beings that can reach a goal and those that cannot.  If computers are to fit with prosocial goals, they should be able to make these judgements, particularly as artificial intelligence advances.
 
