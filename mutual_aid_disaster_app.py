@@ -1,6 +1,7 @@
 k = 10
 
 import streamlit as st
+from io import StringIO
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -12,7 +13,51 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 
 st.set_page_config(page_title="Mutual Aid in Disaster Simulation", layout="wide")
+
 st.title("Mutual Aid and Its Effects on a Disaster-Affected Population")
+
+# --- Unsupervised Learning: Data Upload and Clustering-based Outcome Prediction ---
+st.sidebar.header("Unsupervised ML: Predict Outcomes")
+ml_mode = st.sidebar.checkbox("Enable ML Outcome Prediction", value=False)
+if ml_mode:
+    st.subheader("Upload Data for Unsupervised Learning (Clustering)")
+    uploaded_file = st.file_uploader("Upload CSV (features + optional outcome column)", type=["csv"])
+    if uploaded_file is not None:
+        data = pd.read_csv(uploaded_file)
+        st.write("Preview of uploaded data:", data.head())
+        # Select features for clustering
+        feature_cols = st.multiselect("Select features for clustering", data.columns.tolist(), default=data.columns.tolist()[:-1])
+        n_clusters = st.slider("Number of clusters (k)", min_value=2, max_value=20, value=5)
+        if st.button("Run Clustering"):
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.decomposition import PCA
+            from sklearn.cluster import KMeans
+            X = data[feature_cols].values
+            X_scaled = StandardScaler().fit_transform(X)
+            pca = PCA(n_components=2)
+            X_pca = pca.fit_transform(X_scaled)
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            cluster_labels = kmeans.fit_predict(X_scaled)
+            data['PredictedCluster'] = cluster_labels
+            st.write("Cluster assignments:", data[['PredictedCluster']].value_counts().sort_index())
+            # Visualize clusters
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(8, 6))
+            for i in range(n_clusters):
+                idx = cluster_labels == i
+                ax.scatter(X_pca[idx, 0], X_pca[idx, 1], label=f"Cluster {i}", alpha=0.6)
+            ax.set_xlabel("PCA 1")
+            ax.set_ylabel("PCA 2")
+            ax.set_title("Clusters in Uploaded Data (PCA)")
+            ax.legend()
+            st.pyplot(fig)
+            plt.close(fig)
+            # If outcome column exists, show cluster-outcome relationship
+            outcome_col = st.selectbox("Optional: Select outcome column to compare with clusters", [None] + data.columns.tolist())
+            if outcome_col and outcome_col in data.columns:
+                st.write("Outcome distribution by cluster:")
+                st.dataframe(data.groupby('PredictedCluster')[outcome_col].value_counts().unstack(fill_value=0))
+    st.markdown("---")
 
 # Sidebar controls for population and simulation
 n_large = st.sidebar.checkbox("Enable Large Population (10,000+)", value=False)
@@ -28,32 +73,43 @@ needs = [
     'food', 'water', 'shelter', 'medical', 'sanitation', 'psychological', 'education', 'security', 'transport', 'communication'
 ]
 
-# Generate population data
-ids = np.arange(N)
-ages = np.random.randint(0, 90, N)
-vuln_choices = np.random.choice(['low', 'medium', 'high'], size=N, p=[0.3, 0.5, 0.2])
-locations = np.random.choice(['camp', 'urban', 'rural'], size=N)
-needs_list = [np.random.choice(needs, size=np.random.randint(1, 4), replace=False).tolist() for _ in range(N)]
-df = pd.DataFrame({
-    'id': ids,
-    'age': ages,
-    'vulnerability': vuln_choices,
-    'location': locations,
-    'needs': needs_list
-})
 
-# Initial needs: granular by vulnerability
-person_needs = np.ones((N, len(needs)))
-for i in range(N):
-    vuln = df.loc[i, 'vulnerability']
-    for j, need in enumerate(needs):
-        if need in df.loc[i, 'needs']:
-            if vuln == 'high':
-                person_needs[i, j] = np.random.choice([0, 0.25])
-            elif vuln == 'medium':
-                person_needs[i, j] = np.random.choice([0.25, 0.5])
-            else:
-                person_needs[i, j] = np.random.choice([0.5, 0.75])
+
+@st.cache_data(show_spinner=False)
+def generate_population(N, needs):
+    ids = np.arange(N)
+    ages = np.random.randint(0, 90, N)
+    vulnerability = np.clip(np.random.normal(loc=0.5, scale=0.2, size=N), 0, 1)
+    locations = np.random.choice(['camp', 'urban', 'rural'], size=N)
+    # Convert needs_list to tuples for hashability
+    needs_list = [tuple(np.random.choice(needs, size=np.random.randint(1, 4), replace=False)) for _ in range(N)]
+    df = pd.DataFrame({
+        'id': ids,
+        'age': ages,
+        'vulnerability': vulnerability,
+        'location': locations,
+        'needs': needs_list
+    })
+    return df
+
+df = generate_population(N, needs)
+
+
+@st.cache_data(show_spinner=False)
+def generate_person_needs(df, needs):
+    N = len(df)
+    person_needs = np.ones((N, len(needs)))
+    for i in range(N):
+        vuln = df.loc[i, 'vulnerability']  # Now a float between 0 and 1
+        for j, need in enumerate(needs):
+            if need in df.loc[i, 'needs']:
+                # More vulnerable = lower initial need met
+                low = 0.1 + 0.4 * (1 - vuln)
+                high = 0.6 + 0.3 * (1 - vuln)
+                person_needs[i, j] = np.random.uniform(low, high)
+    return person_needs
+
+person_needs = generate_person_needs(df, needs)
 
 # Mutual aid matrix: can help if not highly vulnerable and shares location or need
 can_help_matrix = np.zeros((N, N), dtype=bool)
@@ -74,13 +130,19 @@ for i in range(N):
 # Harmful members
 harmful_indices = np.random.choice(N, int(N * harmful_fraction), replace=False)
 
-# Simulation: semi-random walks + mutual aid
-walk_history = np.zeros((N, n_steps, len(needs)))
-walk_history[:, 0, :] = person_needs
-for step in range(1, n_steps):
-    for i in range(N):
-        random_step = np.random.normal(loc=0.05, scale=0.02, size=len(needs))
-        walk_history[i, step, :] = np.clip(walk_history[i, step-1, :] + random_step, 0, 1)
+
+@st.cache_data(show_spinner=False)
+def simulate_walk_history(person_needs, n_steps, needs):
+    N = person_needs.shape[0]
+    walk_history = np.zeros((N, n_steps, len(needs)))
+    walk_history[:, 0, :] = person_needs
+    for step in range(1, n_steps):
+        # Vectorized random walk for all individuals
+        random_steps = np.random.normal(loc=0.05, scale=0.02, size=(N, len(needs)))
+        walk_history[:, step, :] = np.clip(walk_history[:, step-1, :] + random_steps, 0, 1)
+    return walk_history
+
+walk_history = simulate_walk_history(person_needs, n_steps, needs)
 
 
 # --- PCA + KMeans Clustering: Find 10 maximally different groups ---
@@ -92,19 +154,35 @@ kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
 cluster_labels = kmeans.fit_predict(features_2d)
 df['cluster'] = cluster_labels
 
-# Model finite resources for each need (e.g., food, water)
-finite_resources = np.random.randint(N//2, N, size=len(needs))
+
+# Resource density and scarcity sliders
+st.sidebar.subheader("Resource Environment")
+resource_density = st.sidebar.slider("Resource Density (mean)", min_value=0.1, max_value=2.0, value=1.0, step=0.05, help="Controls the average amount of resources available per need.")
+resource_scarcity = st.sidebar.slider("Resource Scarcity (spread)", min_value=0.0, max_value=1.0, value=0.5, step=0.05, help="Controls the variability (scarcity) of resources across needs.")
+
+# Model finite resources for each need (e.g., food, water) based on sliders
+min_res = int(N * 0.1 * resource_density * (1 - resource_scarcity))
+max_res = int(N * 1.0 * resource_density * (1 + resource_scarcity))
+if min_res < 1: min_res = 1
+finite_resources = np.random.randint(min_res, max_res+1, size=len(needs))
 st.sidebar.write("Finite Tangible Resources (per need):")
 st.sidebar.write(dict(zip(needs, finite_resources)))
 
-def fractal_aid(i, depth, max_depth, visited, resource_state):
+def fractal_aid(i, depth, max_depth, visited, resource_state, reciprocity_boost=None):
+    if reciprocity_boost is None:
+        reciprocity_boost = np.zeros(len(needs))
     if depth > max_depth or i in visited:
-        return np.zeros(len(needs)), resource_state
+        return np.zeros(len(needs)), resource_state, reciprocity_boost
     visited.add(i)
     helpers = np.where(can_help_matrix[:, i])[0]
     total_aid = np.zeros(len(needs))
+    received_aid = np.zeros(len(needs))  # Track how much aid this node receives
     for h in helpers:
-        aid_strength = np.random.uniform(0.05, 0.2, len(needs))
+        # --- Reciprocity: helpers who received more aid in the past are more likely to help ---
+        base_aid_strength = np.random.uniform(0.05, 0.2, len(needs))
+        # Boost aid strength if this helper received aid in the past (reciprocity)
+        boost = reciprocity_boost if reciprocity_boost is not None else np.zeros(len(needs))
+        aid_strength = base_aid_strength + 0.2 * boost  # 0.2 is a tunable feedback factor
         if h in harmful_indices:
             harm_score = np.mean(walk_history[h, -1, :])
             needs_mask = np.array([need in df.loc[h, 'needs'] for need in needs])
@@ -117,8 +195,23 @@ def fractal_aid(i, depth, max_depth, visited, resource_state):
             resource_curve = np.log1p(resource_state[needs_mask]) / np.log1p(finite_resources[needs_mask])
             base_aid = np.log1p(1 + helper_score) * aid_strength[needs_mask] * resource_curve
             resource_state[needs_mask] = np.maximum(resource_state[needs_mask] - 1, 0)
-        # Recursive branching
-        branch_aid, resource_state = fractal_aid(h, depth+1, max_depth, visited.copy(), resource_state)
+
+            # --- Resource/Need Trading Logic ---
+            helper_needs = walk_history[h, -1, :]
+            recipient_needs = walk_history[i, -1, :]
+            surplus_indices = np.where(helper_needs < 0.3)[0]
+            deficit_indices = np.where(recipient_needs > 0.7)[0]
+            for s in surplus_indices:
+                for d in deficit_indices:
+                    if s != d and resource_state[s] > 0 and resource_state[d] > 0:
+                        trade_amt = min(0.1, resource_state[s], resource_state[d])
+                        resource_state[s] -= trade_amt
+                        resource_state[d] -= trade_amt
+                        total_aid[d] += trade_amt * 0.5
+                        total_aid[s] += trade_amt * 0.5
+
+        # Recursive branching, pass updated reciprocity_boost
+        branch_aid, resource_state, branch_reciprocity = fractal_aid(h, depth+1, max_depth, visited.copy(), resource_state, reciprocity_boost)
         # Logarithmic payoff increase from leaf to stem
         branch_depth = max_depth - depth + 1
         if branch_depth > 1:
@@ -127,7 +220,10 @@ def fractal_aid(i, depth, max_depth, visited, resource_state):
             payoff_multiplier = 1.0
         total_aid[needs_mask] += base_aid * payoff_multiplier
         total_aid += 0.5 * branch_aid
-    return total_aid, resource_state
+        received_aid[needs_mask] += base_aid * payoff_multiplier  # Track aid received for reciprocity
+    # Update reciprocity_boost for this node: more received aid = more likely to help others
+    new_reciprocity_boost = reciprocity_boost + 0.5 * received_aid  # 0.5 is a tunable feedback factor
+    return total_aid, resource_state, new_reciprocity_boost
 
 max_branch_depth = st.sidebar.slider("Mutual Aid Branching Depth", min_value=1, max_value=4, value=2, step=1)
 aid_weights = np.zeros((N, len(needs)))
@@ -148,7 +244,7 @@ else:
         rep = members[0]
         cluster_representatives.append(rep)
         resource_state = global_resource_state.copy()
-        aid, resource_state = fractal_aid(rep, 1, max_branch_depth, set(), resource_state)
+        aid, resource_state, _ = fractal_aid(rep, 1, max_branch_depth, set(), resource_state)
         # Assign this aid to all cluster members
         aid_weights[members, :] = aid
         global_resource_state = resource_state
@@ -206,53 +302,52 @@ if sampled_rows:
 st.subheader("Average Final Needs Met per Type After Mutual Aid")
 st.bar_chart(pd.Series(avg_final_needs, index=needs))
 
-# Visualize fractal branching structure for a sample of individuals
-st.subheader("Mutual Aid Fractal Branching Structure (Sample)")
-import networkx as nx
-sample_branch_size = st.sidebar.slider("Branching Visualization Sample Size", min_value=1, max_value=10, value=3, step=1)
-sample_nodes = np.random.choice(N, sample_branch_size, replace=False)
-max_depth_vis = st.sidebar.slider("Branching Visualization Depth", min_value=1, max_value=3, value=2, step=1)
 
+# Visualize fractal branching structure for a sample of individuals (limit for large N)
+if N <= 2000:
+    st.subheader("Mutual Aid Fractal Branching Structure (Sample)")
+    import networkx as nx
+    sample_branch_size = st.sidebar.slider("Branching Visualization Sample Size", min_value=1, max_value=10, value=3, step=1)
+    sample_nodes = np.random.choice(N, sample_branch_size, replace=False)
+    max_depth_vis = st.sidebar.slider("Branching Visualization Depth", min_value=1, max_value=3, value=2, step=1)
 
-# --- Filtered Branch Graph Visualization: Only 20% Strongest and 20% Weakest Connections ---
-def build_branch_graph_filtered(root, depth, max_depth, visited, G, edge_strengths, quantile_low=0.05, quantile_high=0.95):
-    if depth > max_depth or root in visited:
-        return
-    visited.add(root)
-    helpers = np.where(can_help_matrix[:, root])[0]
-    # Calculate connection strengths (e.g., by aid potential or similarity)
-    strengths = []
-    for h in helpers:
-        # Example: use cosine similarity of needs as connection strength
-        v1 = person_needs[root]
-        v2 = person_needs[h]
-        sim = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
-        strengths.append((h, sim))
-    if strengths:
-        sims = np.array([s[1] for s in strengths])
-        low = np.quantile(sims, quantile_low)
-        high = np.quantile(sims, quantile_high)
-        for h, sim in strengths:
-            if sim <= low or sim >= high:
-                G.add_edge(root, h, weight=sim)
-                edge_strengths.append(sim)
-                build_branch_graph_filtered(h, depth+1, max_depth, visited.copy(), G, edge_strengths, quantile_low, quantile_high)
+    def build_branch_graph_filtered(root, depth, max_depth, visited, G, edge_strengths, quantile_low=0.05, quantile_high=0.95):
+        if depth > max_depth or root in visited:
+            return
+        visited.add(root)
+        helpers = np.where(can_help_matrix[:, root])[0]
+        strengths = []
+        for h in helpers:
+            v1 = person_needs[root]
+            v2 = person_needs[h]
+            sim = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
+            strengths.append((h, sim))
+        if strengths:
+            sims = np.array([s[1] for s in strengths])
+            low = np.quantile(sims, quantile_low)
+            high = np.quantile(sims, quantile_high)
+            for h, sim in strengths:
+                if sim <= low or sim >= high:
+                    G.add_edge(root, h, weight=sim)
+                    edge_strengths.append(sim)
+                    build_branch_graph_filtered(h, depth+1, max_depth, visited.copy(), G, edge_strengths, quantile_low, quantile_high)
 
-for node in sample_nodes:
-    G = nx.DiGraph()
-    edge_strengths = []
-    build_branch_graph_filtered(node, 1, max_depth_vis, set(), G, edge_strengths, quantile_low=0.05, quantile_high=0.95)
-    fig, ax = plt.subplots(figsize=(8, 4))
-    pos = nx.spring_layout(G, seed=42)
-    # Draw edges with color mapped to strength
-    edges = G.edges(data=True)
-    weights = [d.get('weight', 0.5) for (_, _, d) in edges]
-    norm = plt.Normalize(min(weights) if weights else 0, max(weights) if weights else 1)
-    edge_colors = plt.cm.coolwarm(norm(weights)) if weights else 'gray'
-    nx.draw(G, pos, ax=ax, with_labels=True, node_size=100, arrows=True, edge_color=edge_colors, width=2)
-    ax.set_title(f"Branching Structure (Top/Bottom 5%) for Individual {node}")
-    st.pyplot(fig)
-    plt.close(fig)
+    for node in sample_nodes:
+        G = nx.DiGraph()
+        edge_strengths = []
+        build_branch_graph_filtered(node, 1, max_depth_vis, set(), G, edge_strengths, quantile_low=0.05, quantile_high=0.95)
+        fig, ax = plt.subplots(figsize=(8, 4))
+        pos = nx.spring_layout(G, seed=42)
+        edges = G.edges(data=True)
+        weights = [d.get('weight', 0.5) for (_, _, d) in edges]
+        norm = plt.Normalize(min(weights) if weights else 0, max(weights) if weights else 1)
+        edge_colors = plt.cm.coolwarm(norm(weights)) if weights else 'gray'
+        nx.draw(G, pos, ax=ax, with_labels=True, node_size=100, arrows=True, edge_color=edge_colors, width=2)
+        ax.set_title(f"Branching Structure (Top/Bottom 5%) for Individual {node}")
+        st.pyplot(fig)
+        plt.close(fig)
+else:
+    st.info("Branching visualization disabled for large populations (N > 2000) for performance.")
 
 # Show final needs for a sample of individuals
 st.subheader("Final Needs for Sample Individuals")
@@ -279,8 +374,9 @@ if N <= 5000:
 else:
     st.info("Heatmap disabled for large populations (N > 5000) for performance.")
 
-# Evolution of needs over time
-st.subheader("Evolution of Population Needs Over Time")
+
+# Evolution of needs over time (mean, min, max)
+st.subheader("Evolution of Population Needs Over Time (Mean)")
 avg_needs_over_time = np.mean(walk_history, axis=0)
 fig2, ax2 = plt.subplots(figsize=(12, 6))
 sns.heatmap(avg_needs_over_time.T, cmap="YlGnBu", cbar_kws={'label': 'Average Need Met'}, xticklabels=[f"Step {i}" for i in range(n_steps)], yticklabels=needs, ax=ax2)
@@ -289,6 +385,26 @@ ax2.set_ylabel("Needs")
 ax2.set_title("Average Population Needs Over Time")
 st.pyplot(fig2)
 plt.close(fig2)
+
+st.subheader("Evolution of Population Needs Over Time (Min)")
+min_needs_over_time = np.min(walk_history, axis=0)
+fig_min, ax_min = plt.subplots(figsize=(12, 6))
+sns.heatmap(min_needs_over_time.T, cmap="YlOrRd", cbar_kws={'label': 'Min Need Met'}, xticklabels=[f"Step {i}" for i in range(n_steps)], yticklabels=needs, ax=ax_min)
+ax_min.set_xlabel("Simulation Step")
+ax_min.set_ylabel("Needs")
+ax_min.set_title("Minimum Population Needs Over Time")
+st.pyplot(fig_min)
+plt.close(fig_min)
+
+st.subheader("Evolution of Population Needs Over Time (Max)")
+max_needs_over_time = np.max(walk_history, axis=0)
+fig_max, ax_max = plt.subplots(figsize=(12, 6))
+sns.heatmap(max_needs_over_time.T, cmap="YlGn", cbar_kws={'label': 'Max Need Met'}, xticklabels=[f"Step {i}" for i in range(n_steps)], yticklabels=needs, ax=ax_max)
+ax_max.set_xlabel("Simulation Step")
+ax_max.set_ylabel("Needs")
+ax_max.set_title("Maximum Population Needs Over Time")
+st.pyplot(fig_max)
+plt.close(fig_max)
 
 ## --- PCA + KMeans Clustering: Find 10 maximally different groups ---
 st.subheader("Clustering: 10 Maximally Different Groups (PCA + KMeans)")
