@@ -1,5 +1,4 @@
 k = 10
-
 import streamlit as st
 from io import StringIO
 import numpy as np
@@ -19,45 +18,6 @@ st.title("Mutual Aid and Its Effects on a Disaster-Affected Population")
 # --- Unsupervised Learning: Data Upload and Clustering-based Outcome Prediction ---
 st.sidebar.header("Unsupervised ML: Predict Outcomes")
 ml_mode = st.sidebar.checkbox("Enable ML Outcome Prediction", value=False)
-if ml_mode:
-    st.subheader("Upload Data for Unsupervised Learning (Clustering)")
-    uploaded_file = st.file_uploader("Upload CSV (features + optional outcome column)", type=["csv"])
-    if uploaded_file is not None:
-        data = pd.read_csv(uploaded_file)
-        st.write("Preview of uploaded data:", data.head())
-        # Select features for clustering
-        feature_cols = st.multiselect("Select features for clustering", data.columns.tolist(), default=data.columns.tolist()[:-1])
-        n_clusters = st.slider("Number of clusters (k)", min_value=2, max_value=20, value=5)
-        if st.button("Run Clustering"):
-            from sklearn.preprocessing import StandardScaler
-            from sklearn.decomposition import PCA
-            from sklearn.cluster import KMeans
-            X = data[feature_cols].values
-            X_scaled = StandardScaler().fit_transform(X)
-            pca = PCA(n_components=2)
-            X_pca = pca.fit_transform(X_scaled)
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            cluster_labels = kmeans.fit_predict(X_scaled)
-            data['PredictedCluster'] = cluster_labels
-            st.write("Cluster assignments:", data[['PredictedCluster']].value_counts().sort_index())
-            # Visualize clusters
-            import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(figsize=(8, 6))
-            for i in range(n_clusters):
-                idx = cluster_labels == i
-                ax.scatter(X_pca[idx, 0], X_pca[idx, 1], label=f"Cluster {i}", alpha=0.6)
-            ax.set_xlabel("PCA 1")
-            ax.set_ylabel("PCA 2")
-            ax.set_title("Clusters in Uploaded Data (PCA)")
-            ax.legend()
-            st.pyplot(fig)
-            plt.close(fig)
-            # If outcome column exists, show cluster-outcome relationship
-            outcome_col = st.selectbox("Optional: Select outcome column to compare with clusters", [None] + data.columns.tolist())
-            if outcome_col and outcome_col in data.columns:
-                st.write("Outcome distribution by cluster:")
-                st.dataframe(data.groupby('PredictedCluster')[outcome_col].value_counts().unstack(fill_value=0))
-    st.markdown("---")
 
 # Sidebar controls for population and simulation
 n_large = st.sidebar.checkbox("Enable Large Population (10,000+)", value=False)
@@ -136,10 +96,25 @@ def simulate_walk_history(person_needs, n_steps, needs):
     N = person_needs.shape[0]
     walk_history = np.zeros((N, n_steps, len(needs)))
     walk_history[:, 0, :] = person_needs
+    # Define need hierarchy indices
+    level1 = [needs.index(n) for n in ['food', 'water', 'shelter']]
+    level2 = [needs.index(n) for n in ['medical', 'sanitation', 'security', 'transport', 'communication']]
+    level3 = [needs.index(n) for n in ['psychological', 'education']]
+    threshold = 0.5
     for step in range(1, n_steps):
         # Vectorized random walk for all individuals
         random_steps = np.random.normal(loc=0.05, scale=0.02, size=(N, len(needs)))
-        walk_history[:, step, :] = np.clip(walk_history[:, step-1, :] + random_steps, 0, 1)
+        next_step = np.clip(walk_history[:, step-1, :] + random_steps, 0, 1)
+        # Enforce hierarchy: cap higher-level needs if lower-level needs are unmet
+        min_level1 = np.min(next_step[:, level1], axis=1)
+        min_level2 = np.min(next_step[:, level2], axis=1)
+        # Cap level2 and level3 by level1
+        for idx in level2:
+            next_step[:, idx] = np.where(min_level1 < threshold, np.minimum(next_step[:, idx], min_level1), next_step[:, idx])
+        for idx in level3:
+            next_step[:, idx] = np.where(min_level1 < threshold, np.minimum(next_step[:, idx], min_level1), next_step[:, idx])
+            next_step[:, idx] = np.where(min_level2 < threshold, np.minimum(next_step[:, idx], min_level2), next_step[:, idx])
+        walk_history[:, step, :] = next_step
     return walk_history
 
 walk_history = simulate_walk_history(person_needs, n_steps, needs)
@@ -165,8 +140,33 @@ min_res = int(N * 0.1 * resource_density * (1 - resource_scarcity))
 max_res = int(N * 1.0 * resource_density * (1 + resource_scarcity))
 if min_res < 1: min_res = 1
 finite_resources = np.random.randint(min_res, max_res+1, size=len(needs))
-st.sidebar.write("Finite Tangible Resources (per need):")
-st.sidebar.write(dict(zip(needs, finite_resources)))
+
+# --- Enhanced Finite Tangible Resources Sidebar Section ---
+st.sidebar.markdown("---")
+st.sidebar.subheader(":package: Finite Tangible Resources")
+st.sidebar.caption("These are the available resources for each need in the simulation. Adjust density and scarcity above to see how resources change.")
+
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+resource_dict = dict(zip(needs, finite_resources))
+
+# Color bar chart for resources
+fig_res, ax_res = plt.subplots(figsize=(2.5, 2.5))
+colors = list(mcolors.TABLEAU_COLORS.values())
+ax_res.barh(list(resource_dict.keys()), list(resource_dict.values()), color=colors[:len(resource_dict)])
+ax_res.set_xlabel("Units")
+ax_res.set_title("Resources per Need", fontsize=10)
+plt.tight_layout()
+st.sidebar.pyplot(fig_res)
+plt.close(fig_res)
+
+# Pretty table with tooltips
+import streamlit as st
+from collections import OrderedDict
+st.sidebar.markdown("**Resource Levels:**")
+for i, (need, val) in enumerate(resource_dict.items()):
+    st.sidebar.markdown(f"- <span title='Units available for {need}' style='color:{colors[i%len(colors)]};font-weight:bold'>{need.capitalize()}</span>: <b>{val}</b>", unsafe_allow_html=True)
+st.sidebar.markdown("---")
 
 def fractal_aid(i, depth, max_depth, visited, resource_state, reciprocity_boost=None):
     if reciprocity_boost is None:
@@ -254,6 +254,18 @@ else:
 
 # Final needs after mutual aid
 final_needs = np.clip(walk_history[:, -1, :] + aid_weights, 0, 1)
+# Enforce hierarchy on final_needs
+level1 = [needs.index(n) for n in ['food', 'water', 'shelter']]
+level2 = [needs.index(n) for n in ['medical', 'sanitation', 'security', 'transport', 'communication']]
+level3 = [needs.index(n) for n in ['psychological', 'education']]
+threshold = 0.5
+min_level1 = np.min(final_needs[:, level1], axis=1)
+min_level2 = np.min(final_needs[:, level2], axis=1)
+for idx in level2:
+    final_needs[:, idx] = np.where(min_level1 < threshold, np.minimum(final_needs[:, idx], min_level1), final_needs[:, idx])
+for idx in level3:
+    final_needs[:, idx] = np.where(min_level1 < threshold, np.minimum(final_needs[:, idx], min_level1), final_needs[:, idx])
+    final_needs[:, idx] = np.where(min_level2 < threshold, np.minimum(final_needs[:, idx], min_level2), final_needs[:, idx])
 avg_final_needs = np.mean(final_needs, axis=0)
 
 # --- PCA + KMeans Clustering: Find 10 maximally different groups ---
@@ -301,6 +313,77 @@ if sampled_rows:
 
 st.subheader("Average Final Needs Met per Type After Mutual Aid")
 st.bar_chart(pd.Series(avg_final_needs, index=needs))
+#########################
+# ML OUTCOME PREDICTION #
+#########################
+if ml_mode:
+    st.subheader("Upload Data for Unsupervised Learning (Clustering)")
+    uploaded_file = st.file_uploader("Upload CSV (features + optional outcome column)", type=["csv"])
+    if 'use_sim' not in st.session_state:
+        st.session_state['use_sim'] = False
+    st.info("Or use the current simulation output for ML clustering:")
+    if st.button("Use Simulation Output for ML Clustering"):
+        st.session_state['use_sim'] = True
+    data = None
+    if uploaded_file is not None:
+        data = pd.read_csv(uploaded_file)
+        st.session_state['use_sim'] = False
+        st.write("Preview of uploaded data:", data.head())
+    elif st.session_state['use_sim']:
+        # Use simulation output: combine df and final_needs
+        sim_data = df.copy().reset_index(drop=True)
+        for i, n in enumerate(needs):
+            sim_data[n] = final_needs[:, i]
+        data = sim_data
+        st.write("Preview of simulation output as ML data:", data.head())
+    if data is not None:
+        # Only allow numeric columns for default feature selection
+        numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+        if not numeric_cols:
+            st.error("No numeric columns found in data. Please upload a file or run a simulation with numeric features.")
+        else:
+            feature_cols = st.multiselect(
+                "Select features for clustering (numeric only)",
+                data.columns.tolist(),
+                default=numeric_cols
+            )
+            # Warn if any selected features are not numeric
+            non_numeric_selected = [col for col in feature_cols if col not in numeric_cols]
+            if non_numeric_selected:
+                st.warning(f"The following selected features are not numeric and will be excluded: {non_numeric_selected}")
+                feature_cols = [col for col in feature_cols if col in numeric_cols]
+            n_clusters = st.slider("Number of clusters (k)", min_value=2, max_value=20, value=5)
+            if st.button("Run Clustering"):
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.decomposition import PCA
+                from sklearn.cluster import KMeans
+                X = data[feature_cols].values
+                X_scaled = StandardScaler().fit_transform(X)
+                pca = PCA(n_components=2)
+                X_pca = pca.fit_transform(X_scaled)
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                cluster_labels = kmeans.fit_predict(X_scaled)
+                data['PredictedCluster'] = cluster_labels
+                st.write("Cluster assignments:", data[['PredictedCluster']].value_counts().sort_index())
+                # Visualize clusters
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots(figsize=(8, 6))
+                for i in range(n_clusters):
+                    idx = cluster_labels == i
+                    ax.scatter(X_pca[idx, 0], X_pca[idx, 1], label=f"Cluster {i}", alpha=0.6)
+                ax.set_xlabel("PCA 1")
+                ax.set_ylabel("PCA 2")
+                ax.set_title("Clusters in Data (PCA)")
+                ax.legend()
+                st.pyplot(fig)
+                plt.close(fig)
+                # If outcome column exists, show cluster-outcome relationship
+                outcome_col = st.selectbox("Optional: Select outcome column to compare with clusters", [None] + data.columns.tolist())
+                if outcome_col and outcome_col in data.columns:
+                    st.write("Outcome distribution by cluster:")
+                    st.dataframe(data.groupby('PredictedCluster')[outcome_col].value_counts().unstack(fill_value=0))
+    st.markdown("---")
+    st.info("If you see a TypeError about loading a JS module, try a hard refresh in your browser. If that fails, stop Streamlit, clear the .streamlit and __pycache__ folders, and relaunch the app.")
 
 
 # Visualize fractal branching structure for a sample of individuals (limit for large N)
